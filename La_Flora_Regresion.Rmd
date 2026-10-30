@@ -50,7 +50,8 @@ datos <- read_excel("Datos_Vivienda.xlsx",
     col_types = c("text", "text", "text",
         "numeric", "numeric", "numeric",
         "numeric", "numeric", "text", "text",
-        "numeric", "numeric"))
+        "numeric", "numeric"),
+    na = c("", "NA"))   # en el Excel, los faltantes vienen escritos como "NA"
 
 # Se fijan los nombres de las 12 columnas (en el mismo orden del archivo) para que
 # el código no dependa de mayúsculas o tildes. Si tu archivo ya trae estos nombres,

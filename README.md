@@ -34,4 +34,12 @@ Las cifras que aparecen en el texto se calculan con código R en línea (`` `r .
 4. Haz clic en **Knit**, que genera el HTML.
 5. En la ventana del HTML, haz clic en **Publish** (el ícono azul) → **RPubs** → **Publish**. Inicia sesión o crea tu cuenta, completa el título y la URL, y copia el enlace.
 
+## Versión en script de R
+
+`El_Caney_Regresion.R` y `La_Flora_Regresion.R` contienen el mismo código de los chunks, sin el texto, para correrlo en una hoja de código de RStudio:
+
+1. Deja `Datos_Vivienda.xlsx` en la misma carpeta que el script.
+2. Ve a **Session → Set Working Directory → To Source File Location**.
+3. Corre todo con **Ctrl+Shift+Enter** (Source with Echo) o por partes con **Ctrl+Enter**.
+
 La carpeta `vista_previa/` tiene el HTML de ambos documentos, compilado con este mismo `Datos_Vivienda.xlsx`, para ver el resultado antes de compilar.
