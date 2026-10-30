@@ -4,8 +4,8 @@ Dos entregables independientes en R Markdown, listos para compilar y publicar en
 
 | Archivo | Barrio | Grafías unificadas | Ofertas analizadas |
 |---|---|---|---|
-| `El_Caney_Regresion.Rmd` | El Caney (Zona Sur) | "El Caney", "el caney", "caney", "Caney Especial" | 299 |
-| `La_Flora_Regresion.Rmd` | La Flora (Zona Norte) | "La Flora", "la flora", "laflora", "flora", "norte la flora", "Urbanización La Flora" | 448 |
+| `El_Caney_Regresion.Rmd` | El Caney (Zona Sur) | "El Caney", "el caney", "caney", "caney especial" | 299 |
+| `La_Flora_Regresion.Rmd` | La Flora (Zona Norte) | "La Flora", "la flora", "laflora", "flora", "norte la flora", "urbanizacion la flora" | 448 |
 
 En La Flora se excluyen "Flora Industrial" y "Floralia", que son otros sectores. También se descarta un registro de La Flora marcado como "Zona Sur".
 
@@ -23,7 +23,7 @@ Las cifras que aparecen en el texto se calculan con código R en línea (`` `r .
 
 ## Cómo publicarlo en RPubs
 
-1. Pon `Datos_Vivienda.xlsx` en la misma carpeta que el `.Rmd`.
+1. Descarga el repositorio completo: ya incluye `Datos_Vivienda.xlsx` junto a los `.Rmd`. Si trabajas con otra copia, deja el Excel en la misma carpeta que el `.Rmd`.
 2. Abre el `.Rmd` en RStudio e instala los paquetes, una sola vez:
 
    ```r
@@ -34,4 +34,4 @@ Las cifras que aparecen en el texto se calculan con código R en línea (`` `r .
 4. Haz clic en **Knit**, que genera el HTML.
 5. En la ventana del HTML, haz clic en **Publish** (el ícono azul) → **RPubs** → **Publish**. Inicia sesión o crea tu cuenta, completa el título y la URL, y copia el enlace.
 
-La carpeta `vista_previa/` tiene el HTML ya compilado de ambos documentos, para ver el resultado antes de compilar.
+La carpeta `vista_previa/` tiene el HTML de ambos documentos, compilado con este mismo `Datos_Vivienda.xlsx`, para ver el resultado antes de compilar.

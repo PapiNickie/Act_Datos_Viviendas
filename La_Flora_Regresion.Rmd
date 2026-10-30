@@ -79,7 +79,7 @@ table(datos$Barrio[grepl("flora", datos$barrio_std)])
 
 La tabla mezcla dos situaciones:
 
-- **Son La Flora:** "La Flora", "la flora", "laflora", "flora", "norte la flora" y "Urbanización La Flora". Son el mismo barrio escrito de seis maneras. Si filtráramos solo por "la flora" dejaríamos por fuera la urbanización completa, con más de 80 ofertas.
+- **Son La Flora:** "La Flora", "la flora", "laflora", "flora", "norte la flora" y "urbanizacion la flora". Son el mismo barrio escrito de seis maneras. Si filtráramos solo por "la flora" dejaríamos por fuera la urbanización completa, con más de 80 ofertas.
 - **No son La Flora:** "Flora Industrial" es un sector industrial vecino con otra dinámica de precios, y "Floralia" es un barrio distinto. Ambos se excluyen.
 
 También conviene revisar la zona asignada a estos registros:
@@ -214,7 +214,7 @@ Cada modelo se va a evaluar con las mismas cuatro pruebas formales, además de l
 | Independencia | Durbin-Watson | No hay autocorrelación | p > 0.05 |
 | Forma funcional | RESET de Ramsey | El modelo lineal está bien especificado | p > 0.05 |
 
-Una advertencia sobre Durbin-Watson: esta prueba fue pensada para datos ordenados en el tiempo. Aquí las filas siguen el orden del archivo (agrupadas por la grafía del barrio), así que un p-valor bajo indica que las ofertas vecinas en el archivo se parecen entre sí, no que exista una dinámica temporal. Se reporta, pero con esa cautela.
+Una advertencia sobre Durbin-Watson: esta prueba fue pensada para datos ordenados en el tiempo. Aquí las filas siguen el orden en que vienen en el archivo, que no tiene sentido temporal, así que su resultado depende de cómo esté ordenada la base. Un p-valor bajo indica que ofertas contiguas en el archivo se parecen entre sí (por ejemplo, porque se publicaron o cargaron juntas), no que exista una dinámica en el tiempo. Se reporta, pero con esa cautela.
 
 ```{r}
 # 0) Formato de números y p-valores (para las tablas y para el texto)
