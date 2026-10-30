@@ -1,0 +1,794 @@
+---
+title: "Precio de la vivienda en La Flora (Cali): regresión lineal simple y múltiple"
+author: "Nombre del estudiante"
+date: "Octubre 2026"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    theme: flatly
+    df_print: kable
+    code_folding: show
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, results = "show", message = FALSE, warning = FALSE,
+                      fig.align = "center", fig.width = 9, fig.height = 6)
+```
+
+# **Introducción**
+
+La Flora es uno de los barrios tradicionales del norte de Cali. Es estrato 5 en su gran mayoría, y en sus calles conviven edificios de apartamentos con casas amplias de urbanización, muchas de ellas con décadas encima. Esa convivencia de dos mercados, el del apartamento en edificio y el de la casa grande, es lo que hace interesante modelar sus precios: no siempre lo más grande es lo más caro por metro.
+
+En este informe se filtra la base **Datos_Vivienda** (8.322 ofertas de vivienda usada en Cali) por el barrio La Flora, **sin filtrar por tipo de inmueble**, y se resuelven dos bloques:
+
+1. **Modelación simple:** tres modelos con un solo predictor, su interpretación, la validación de supuestos y la pertinencia de una transformación logarítmica.
+2. **Modelación múltiple:** dos modelos con varios predictores (uno de ellos con variable *dummy*), validación de supuestos y de transformaciones, selección de variables paso a paso, una predicción hipotética con `predict()` y el cálculo del MAE.
+
+# **1. Preparación de los datos**
+
+## **1.1 Librerías**
+
+```{r}
+# Si falta alguna librería, instálala una sola vez con:
+# install.packages(c("readxl", "dplyr", "ggplot2", "plotly", "lmtest", "car"))
+
+library(readxl)   # leer el archivo de Excel
+library(dplyr)    # filtrar, transformar y resumir datos
+library(ggplot2)  # gráficos
+library(plotly)   # gráficos interactivos
+library(lmtest)   # pruebas de supuestos: Breusch-Pagan, Durbin-Watson y RESET
+library(car)      # VIF (multicolinealidad) y errores estándar robustos
+```
+
+## **1.2 Carga de la base**
+
+El archivo `Datos_Vivienda.xlsx` debe estar en la misma carpeta que este `.Rmd`.
+
+```{r}
+datos <- read_excel("Datos_Vivienda.xlsx",
+    col_types = c("text", "text", "text",
+        "numeric", "numeric", "numeric",
+        "numeric", "numeric", "text", "text",
+        "numeric", "numeric"))
+
+# Se fijan los nombres de las 12 columnas (en el mismo orden del archivo) para que
+# el código no dependa de mayúsculas o tildes. Si tu archivo ya trae estos nombres,
+# esta línea no cambia nada.
+names(datos) <- c("Zona", "piso", "Estrato", "precio_millon", "Area_contruida",
+                  "parqueaderos", "Banos", "Habitaciones", "Tipo", "Barrio",
+                  "cordenada_longitud", "Cordenada_latitud")
+
+# Identificador único por fila, como en el ejemplo de clase
+datos$id <- 1:nrow(datos)
+
+dim(datos)
+```
+
+## **1.3 Unificación del nombre del barrio**
+
+En la base, un mismo barrio aparece escrito de varias formas: con o sin artículo, pegado, en mayúsculas o con el prefijo "Urbanización". Antes de filtrar conviene ver todas las grafías que contienen la palabra *flora*:
+
+```{r}
+# Versión estandarizada del nombre: minúsculas y sin espacios sobrantes
+datos$barrio_std <- tolower(trimws(datos$Barrio))
+
+# Todas las formas en que aparece "flora" en la base
+table(datos$Barrio[grepl("flora", datos$barrio_std)])
+```
+
+La tabla mezcla dos situaciones:
+
+- **Son La Flora:** "La Flora", "la flora", "laflora", "flora", "norte la flora" y "Urbanización La Flora". Son el mismo barrio escrito de seis maneras. Si filtráramos solo por "la flora" dejaríamos por fuera la urbanización completa, con más de 80 ofertas.
+- **No son La Flora:** "Flora Industrial" es un sector industrial vecino con otra dinámica de precios, y "Floralia" es un barrio distinto. Ambos se excluyen.
+
+También conviene revisar la zona asignada a estos registros:
+
+```{r}
+es_flora <- grepl("flora", datos$barrio_std) & !grepl("industrial|floralia", datos$barrio_std)
+table(datos$Zona[es_flora])
+```
+
+La Flora está en el norte de la ciudad, así que el único registro marcado como "Zona Sur" es un error de digitación y se descarta.
+
+```{r}
+datos_sub <- datos %>%
+  filter(grepl("flora", barrio_std),
+         !grepl("industrial|floralia", barrio_std),
+         Zona == "Zona Norte") %>%
+  mutate(Barrio  = "La Flora",
+         Estrato = as.numeric(Estrato),          # viene como texto desde el Excel
+         Tipo    = factor(Tipo, levels = c("Apartamento", "Casa")))
+
+nrow(datos_sub)
+table(datos_sub$Tipo)
+```
+
+## **1.4 Depuración**
+
+Una vivienda en venta con cero habitaciones o cero baños es un error de digitación, y además impide aplicar logaritmos (log(0) no existe). Esos registros se revisan y se retiran:
+
+```{r}
+datos_sub %>%
+  filter(Habitaciones == 0 | Banos == 0) %>%
+  select(id, Tipo, precio_millon, Area_contruida, Habitaciones, Banos)
+
+datos_sub <- datos_sub %>% filter(Habitaciones > 0, Banos > 0)
+nrow(datos_sub)
+```
+
+```{r}
+# Valores faltantes por variable
+colSums(is.na(datos_sub[, c("precio_millon", "Area_contruida", "Habitaciones",
+                            "Banos", "parqueaderos", "Estrato", "Tipo", "piso")]))
+```
+
+Quedan **`r nrow(datos_sub)` ofertas**, muy por encima del mínimo de 30. Las variables centrales (precio, área, habitaciones, baños, estrato y tipo) están completas. Faltan datos en `parqueaderos` (`r sum(is.na(datos_sub$parqueaderos))` registros) y en `piso`. El piso no se usará: no aplica a las casas y está vacío en muchos registros.
+
+## **1.5 Mirada exploratoria**
+
+```{r}
+# Resumen por tipo de vivienda y total del barrio
+resumen <- datos_sub %>%
+  group_by(Tipo) %>%
+  summarise(ofertas = n(),
+            precio_promedio = round(mean(precio_millon), 1),
+            precio_mediano  = median(precio_millon),
+            area_promedio   = round(mean(Area_contruida), 1),
+            habitaciones    = round(mean(Habitaciones), 1),
+            banos           = round(mean(Banos), 1),
+            precio_m2       = round(median(precio_millon / Area_contruida), 2))
+
+total <- datos_sub %>%
+  summarise(ofertas = n(),
+            precio_promedio = round(mean(precio_millon), 1),
+            precio_mediano  = median(precio_millon),
+            area_promedio   = round(mean(Area_contruida), 1),
+            habitaciones    = round(mean(Habitaciones), 1),
+            banos           = round(mean(Banos), 1),
+            precio_m2       = round(median(precio_millon / Area_contruida), 2)) %>%
+  mutate(Tipo = "Total La Flora")
+
+rbind(as.data.frame(resumen), as.data.frame(total))
+```
+
+```{r}
+# Distribución del estrato
+table(datos_sub$Estrato)
+
+# Correlaciones entre el precio y las variables cuantitativas
+cor_tabla <- round(cor(datos_sub[, c("precio_millon", "Area_contruida", "Habitaciones",
+                                     "Banos", "parqueaderos", "Estrato")],
+                       use = "complete.obs"), 2)
+cor_tabla
+```
+
+```{r}
+ggplotly(
+  ggplot(datos_sub, aes(x = precio_millon)) +
+    geom_histogram(binwidth = 50, fill = "#2a78d6", color = "white", alpha = 0.9) +
+    labs(title = "Figura 1. Distribución del precio de la vivienda en La Flora",
+         x = "Precio (millones de pesos)", y = "Número de ofertas") +
+    theme_minimal()
+)
+```
+
+```{r}
+ggplotly(
+  ggplot(datos_sub, aes(x = Tipo, y = precio_millon, fill = Tipo)) +
+    geom_boxplot(alpha = 0.8, outlier.colour = "black") +
+    scale_fill_manual(values = c("Apartamento" = "#2a78d6", "Casa" = "#eb6834")) +
+    labs(title = "Figura 2. Precio según el tipo de vivienda",
+         x = "", y = "Precio (millones de pesos)") +
+    theme_minimal()
+)
+```
+
+```{r}
+ggplotly(
+  ggplot(datos_sub, aes(x = Area_contruida, y = precio_millon, color = Tipo)) +
+    geom_point(alpha = 0.7, size = 2) +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 0.8) +
+    scale_color_manual(values = c("Apartamento" = "#2a78d6", "Casa" = "#eb6834")) +
+    labs(title = paste("Figura 3. Precio vs. área construida  |  r =",
+                       round(cor(datos_sub$precio_millon, datos_sub$Area_contruida), 2)),
+         x = "Área construida (m²)", y = "Precio (millones de pesos)") +
+    theme_minimal()
+)
+```
+
+**Lo que muestran los datos.** En La Flora predominan los apartamentos (`r sum(datos_sub$Tipo == "Apartamento")` de `r nrow(datos_sub)` ofertas), con unos `r round(mean(datos_sub$Area_contruida[datos_sub$Tipo == "Apartamento"]))` m² en promedio y un precio mediano de `r median(datos_sub$precio_millon[datos_sub$Tipo == "Apartamento"])` millones. Las `r sum(datos_sub$Tipo == "Casa")` casas son otra cosa: promedian `r round(mean(datos_sub$Area_contruida[datos_sub$Tipo == "Casa"]))` m², el triple, pero su precio mediano (`r median(datos_sub$precio_millon[datos_sub$Tipo == "Casa"])` millones) apenas es una vez y media el de un apartamento. **El metro cuadrado de casa cuesta la mitad que el de apartamento** (`r resumen$precio_m2[2]` frente a `r resumen$precio_m2[1]` millones por m²). Esa es la tensión central de este barrio, y los modelos tendrán que lidiar con ella.
+
+El histograma se concentra entre 250 y 450 millones (precio mediano de `r median(datos_sub$precio_millon)`), pero tiene una cola larga a la derecha: `r sum(datos_sub$precio_millon > 600)` ofertas superan los 600 millones y la más cara llega a `r max(datos_sub$precio_millon)`. El estrato casi no varía (`r round(100 * mean(datos_sub$Estrato == 5))` % de las ofertas son estrato 5), así que su correlación con el precio es prácticamente nula (`r cor_tabla["precio_millon", "Estrato"]`).
+
+En la Figura 3, el área tiene la relación más fuerte con el precio (r = `r cor_tabla["precio_millon", "Area_contruida"]`). Las dos rectas cuentan la historia: la de los apartamentos sube con pendiente pronunciada y la de las casas, con cerca de la mitad de inclinación, es mucho más plana. La nube se abre como un abanico hacia las áreas grandes, una primera señal de **heterocedasticidad**.
+
+## **1.6 Funciones de apoyo para validar supuestos**
+
+Cada modelo se va a evaluar con las mismas cuatro pruebas formales, además de los cuatro gráficos de diagnóstico de `plot()`. Para no repetir código se definen unas funciones de apoyo:
+
+| Supuesto | Prueba | Hipótesis nula (H0) | Se cumple si |
+|---|---|---|---|
+| Normalidad de los residuos | Shapiro-Wilk | Los residuos son normales | p > 0.05 |
+| Varianza constante | Breusch-Pagan | Homocedasticidad | p > 0.05 |
+| Independencia | Durbin-Watson | No hay autocorrelación | p > 0.05 |
+| Forma funcional | RESET de Ramsey | El modelo lineal está bien especificado | p > 0.05 |
+
+Una advertencia sobre Durbin-Watson: esta prueba fue pensada para datos ordenados en el tiempo. Aquí las filas siguen el orden del archivo (agrupadas por la grafía del barrio), así que un p-valor bajo indica que las ofertas vecinas en el archivo se parecen entre sí, no que exista una dinámica temporal. Se reporta, pero con esa cautela.
+
+```{r}
+# 0) Formato de números y p-valores (para las tablas y para el texto)
+num  <- function(x, d = 2) formatC(as.numeric(x), format = "f", digits = d)
+pct  <- function(b, d = 1) formatC((exp(as.numeric(b)) - 1) * 100, format = "f", digits = d)
+sgn  <- function(x, d = 3) ifelse(x < 0, paste("-", num(abs(x), d)), paste("+", num(x, d)))
+pnum <- function(p) {
+  if (is.character(p)) return(p)
+  ifelse(p < 0.001, "< 0.001", formatC(as.numeric(p), format = "f", digits = 3))
+}
+pval <- function(p) { s <- pnum(p); ifelse(grepl("<", s), s, paste("=", s)) }
+
+# 1) Las cuatro pruebas de supuestos en una sola tabla
+validar_supuestos <- function(modelo) {
+  pruebas <- list(shapiro.test(residuals(modelo)),
+                  bptest(modelo),
+                  dwtest(modelo),
+                  resettest(modelo, power = 2:3))
+  p   <- sapply(pruebas, function(x) x$p.value)
+  est <- sapply(pruebas, function(x) unname(x$statistic))
+  data.frame(Supuesto    = c("Normalidad de los residuos", "Varianza constante",
+                             "Independencia de los errores", "Forma funcional lineal"),
+             Prueba      = c("Shapiro-Wilk", "Breusch-Pagan", "Durbin-Watson", "RESET de Ramsey"),
+             Estadistico = round(est, 3),
+             p_valor     = pnum(p),
+             Resultado   = ifelse(p > 0.05, "Se cumple", "No se cumple"))
+}
+
+# 2) MAE en la escala original (millones), aunque el modelo esté en logaritmos.
+#    Así se pueden comparar modelos con y sin log en la misma unidad.
+mae <- function(modelo) {
+  y_log <- grepl("^log\\(", deparse(formula(modelo)[[2]]))
+  real  <- model.response(model.frame(modelo))
+  pred  <- fitted(modelo)
+  if (y_log) { real <- exp(real); pred <- exp(pred) }
+  mean(abs(real - pred))
+}
+
+# 3) Tabla comparativa de varios modelos
+comparar_modelos <- function(modelos) {
+  filas <- lapply(names(modelos), function(nombre) {
+    m <- modelos[[nombre]]
+    s <- validar_supuestos(m)
+    data.frame(Modelo         = nombre,
+               R2_ajustado    = round(summary(m)$adj.r.squared, 3),
+               MAE            = round(mae(m), 1),
+               p_Shapiro      = s$p_valor[1],
+               p_BreuschPagan = s$p_valor[2],
+               p_DurbinWatson = s$p_valor[3],
+               p_RESET        = s$p_valor[4],
+               Cook_max       = round(max(cooks.distance(m)), 3))
+  })
+  tabla <- do.call(rbind, filas)
+  rownames(tabla) <- NULL
+  tabla
+}
+
+# 4) Las cuatro especificaciones (con y sin logaritmo) de un modelo simple
+comparar_log <- function(variable, datos) {
+  formulas <- c("Lin-Lin" = paste0("precio_millon ~ ", variable),
+                "Log-Lin" = paste0("log(precio_millon) ~ ", variable),
+                "Lin-Log" = paste0("precio_millon ~ log(", variable, ")"),
+                "Log-Log" = paste0("log(precio_millon) ~ log(", variable, ")"))
+  modelos <- lapply(formulas, function(f) lm(as.formula(f), data = datos))
+  comparar_modelos(modelos)
+}
+
+```
+
+En las tablas comparativas, *Lin-Lin* es `precio ~ x`, *Log-Lin* es `log(precio) ~ x`, *Lin-Log* es `precio ~ log(x)` y *Log-Log* es `log(precio) ~ log(x)`. El R² ajustado solo es comparable entre modelos con la misma variable dependiente. Por eso el criterio para comparar escalas distintas es el **MAE en millones**, junto con el cumplimiento de los supuestos. La columna `Cook_max` muestra la mayor distancia de Cook del modelo: un valor cercano o superior a 1 indica que una sola observación está moviendo la estimación.
+
+# **2. Modelación simple**
+
+Se eligen los tres predictores con mayor correlación con el precio: el **área construida** (r = `r cor_tabla["precio_millon", "Area_contruida"]`), el número de **baños** (r = `r cor_tabla["precio_millon", "Banos"]`) y el número de **habitaciones** (r = `r cor_tabla["precio_millon", "Habitaciones"]`).
+
+## **2.1 Modelo simple 1: precio ~ área construida**
+
+### Estimación
+
+```{r}
+mod1 <- lm(precio_millon ~ Area_contruida, data = datos_sub)
+summary(mod1)
+b1 <- coef(mod1)
+```
+
+### Interpretación
+
+La ecuación estimada es **precio = `r num(b1[1])` + `r num(b1[2], 3)` × área**.
+
+En La Flora, cada metro cuadrado adicional se asocia, en promedio, con **`r num(b1[2])` millones más** en el precio de oferta, unos `r num(10 * b1[2], 1)` millones por cada 10 m². El intercepto es alto (`r num(b1[1], 1)` millones) y no describe una vivienda de 0 m². Indica que en este barrio buena parte del precio se paga por la ubicación antes de contar los metros: la recta arranca alta y sube despacio.
+
+Ambos coeficientes son altamente significativos (p < 0.001). El **R² de `r num(summary(mod1)$r.squared, 3)`** dice que el área sola explica cerca del `r round(100 * summary(mod1)$r.squared)` % de la variación del precio.
+
+### Validación de supuestos
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mod1)
+par(mfrow = c(1, 1))
+
+sup1 <- validar_supuestos(mod1)
+sup1
+```
+
+```{r}
+# La observación más influyente del modelo
+cook1 <- cooks.distance(mod1)
+datos_sub[which.max(cook1), c("id", "Tipo", "precio_millon", "Area_contruida",
+                              "Habitaciones", "Banos", "Estrato")]
+max(cook1)
+```
+
+Los diagnósticos muestran tres problemas. El primero es **la varianza**: en *Residuals vs Fitted* y *Scale-Location* los residuos se abren a medida que crece el precio ajustado, y Breusch-Pagan lo confirma con contundencia (p `r pval(sup1$p_valor[2])`). El segundo es **la normalidad**: el *Q-Q plot* se despega de la diagonal, sobre todo en la cola superior (Shapiro p `r pval(sup1$p_valor[1])`). El tercero es **la influencia**: una casa de `r datos_sub$Area_contruida[which.max(cook1)]` m² ofertada en `r datos_sub$precio_millon[which.max(cook1)]` millones tiene una distancia de Cook de `r num(max(cook1), 2)`, prácticamente en el umbral de 1. Esa sola vivienda tira de la recta. RESET también rechaza la forma lineal (p `r pval(sup1$p_valor[4])`).
+
+### ¿Conviene una transformación logarítmica?
+
+```{r}
+cmp1 <- comparar_log("Area_contruida", datos_sub)
+cmp1
+```
+
+La comparación no tiene un ganador absoluto, así que hay que sopesar. El **Lin-Log** tiene el R² ajustado más alto (`r num(cmp1$R2_ajustado[3], 3)`), pero su varianza sigue siendo no constante. Las especificaciones con el precio en logaritmo **corrigen la heterocedasticidad**, y entre ellas el **Log-Log** es claramente mejor que el Log-Lin. Frente al modelo lineal, el Log-Log cumple homocedasticidad (Breusch-Pagan p `r pval(cmp1$p_BreuschPagan[4])`), acerca los residuos a la normalidad, reduce el MAE de `r num(cmp1$MAE[1], 1)` a `r num(cmp1$MAE[4], 1)` millones y **baja la distancia de Cook máxima de `r num(cmp1$Cook_max[1], 2)` a `r num(cmp1$Cook_max[4], 2)`**: en escala logarítmica, la casa de `r datos_sub$Area_contruida[which.max(cook1)]` m² deja de ser una amenaza. Cede un poco de R² ajustado, pero esa cifra no es comparable entre escalas.
+
+```{r}
+mod1_log <- lm(log(precio_millon) ~ log(Area_contruida), data = datos_sub)
+summary(mod1_log)
+
+par(mfrow = c(2, 2))
+plot(mod1_log)
+par(mfrow = c(1, 1))
+
+sup1_log <- validar_supuestos(mod1_log)
+sup1_log
+b1l <- coef(mod1_log)
+```
+
+**Interpretación del modelo Log-Log.** El coeficiente `r num(b1l[2], 3)` es una **elasticidad**: si el área construida aumenta 1 %, el precio aumenta en promedio `r num(b1l[2], 2)` %. Con un aumento del 10 % en el área, el precio sube cerca de `r num((1.1^b1l[2] - 1) * 100, 1)` %. La elasticidad es baja: duplicar el área multiplica el precio apenas por `r num(2^b1l[2], 2)`. Es la misma tensión de la exploración: en La Flora, los metros adicionales se pagan cada vez menos, sobre todo cuando vienen en forma de casa grande.
+
+Los residuos siguen sin ser del todo normales (Shapiro p `r pval(sup1_log$p_valor[1])`) y RESET aún detecta curvatura (p `r pval(sup1_log$p_valor[4])`). Parte de esa curvatura viene de que el barrio mezcla dos mercados (apartamentos y casas) que una sola variable no separa, y esa es la motivación de la dummy de la sección 3. Con `r nrow(datos_sub)` observaciones, el teorema del límite central respalda la inferencia sobre los coeficientes. **Conclusión: la transformación logarítmica es pertinente y el Log-Log es el modelo simple preferido para el área.**
+
+## **2.2 Modelo simple 2: precio ~ baños**
+
+### Estimación
+
+```{r}
+mod2 <- lm(precio_millon ~ Banos, data = datos_sub)
+summary(mod2)
+b2 <- coef(mod2)
+```
+
+### Interpretación
+
+La ecuación es **precio = `r num(b2[1])` + `r num(b2[2])` × baños**. Cada baño adicional se asocia con **`r num(b2[2], 1)` millones más**. Más que el valor de un baño en sí, el coeficiente captura lo que los baños delatan: tamaño, categoría y, a menudo, una remodelación reciente. El coeficiente es significativo (p < 0.001) y el modelo explica el `r round(100 * summary(mod2)$r.squared)` % de la variación del precio (R² = `r num(summary(mod2)$r.squared, 3)`).
+
+### Validación de supuestos
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mod2)
+par(mfrow = c(1, 1))
+
+sup2 <- validar_supuestos(mod2)
+sup2
+```
+
+Como los baños toman pocos valores, los residuos se ordenan en columnas verticales, algo esperable con un predictor discreto. La forma lineal es aceptable (RESET p `r pval(sup2$p_valor[4])`), pero la dispersión crece con el número de baños, y Breusch-Pagan rechaza la varianza constante (p `r pval(sup2$p_valor[2])`). Los residuos tampoco son normales (p `r pval(sup2$p_valor[1])`): hay viviendas con muchos baños y precios muy por encima de lo esperado.
+
+### ¿Conviene una transformación logarítmica?
+
+```{r}
+cmp2 <- comparar_log("Banos", datos_sub)
+cmp2
+
+mod2_log <- lm(log(precio_millon) ~ Banos, data = datos_sub)
+summary(mod2_log)
+
+par(mfrow = c(2, 2))
+plot(mod2_log)
+par(mfrow = c(1, 1))
+
+sup2_log <- validar_supuestos(mod2_log)
+sup2_log
+b2l <- coef(mod2_log)
+```
+
+Aquí gana el **Log-Lin**, con el precio en logaritmo y los baños en niveles. Es la única especificación que cumple a la vez varianza constante (Breusch-Pagan p `r pval(sup2_log$p_valor[2])`) y forma funcional (RESET p `r pval(sup2_log$p_valor[4])`), con el R² ajustado más alto (`r num(cmp2$R2_ajustado[2], 3)`). Su MAE (`r num(cmp2$MAE[2], 1)`) es casi igual al del lineal (`r num(cmp2$MAE[1], 1)`). El Log-Log también corrige la varianza, pero rompe la forma funcional, y el Lin-Log no corrige nada.
+
+**Interpretación del modelo Log-Lin.** En un modelo con el precio en logaritmo y el predictor en niveles, el coeficiente se traduce en porcentaje con (e^b − 1) × 100. Cada baño adicional eleva el precio en un **`r pct(b2l[2])` %**. Leerlo en porcentaje tiene más sentido que en millones fijos, porque un baño adicional no vale lo mismo en un apartamento de 250 millones que en una casa de 800. **Conclusión: la transformación logarítmica del precio es pertinente.**
+
+## **2.3 Modelo simple 3: precio ~ habitaciones**
+
+### Estimación
+
+```{r}
+mod3 <- lm(precio_millon ~ Habitaciones, data = datos_sub)
+summary(mod3)
+b3 <- coef(mod3)
+```
+
+### Interpretación
+
+La ecuación es **precio = `r num(b3[1])` + `r num(b3[2])` × habitaciones**. Cada habitación adicional se asocia con **`r num(b3[2], 1)` millones más**. El coeficiente es significativo (p < 0.001), pero el modelo explica solo el `r round(100 * summary(mod3)$r.squared)` % de la variación del precio (R² = `r num(summary(mod3)$r.squared, 3)`), muy por debajo del área y los baños. En La Flora, contar habitaciones dice poco: una casa antigua de cinco cuartos puede costar menos que un apartamento moderno de tres.
+
+### Validación de supuestos
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mod3)
+par(mfrow = c(1, 1))
+
+sup3 <- validar_supuestos(mod3)
+sup3
+```
+
+El modelo incumple homocedasticidad (Breusch-Pagan p `r pval(sup3$p_valor[2])`), normalidad (p `r pval(sup3$p_valor[1])`) y forma funcional (RESET p `r pval(sup3$p_valor[4])`). Los residuos más grandes son viviendas muy caras que el número de cuartos no logra anticipar.
+
+### ¿Conviene una transformación logarítmica?
+
+```{r}
+cmp3 <- comparar_log("Habitaciones", datos_sub)
+cmp3
+
+mod3_log <- lm(log(precio_millon) ~ Habitaciones, data = datos_sub)
+summary(mod3_log)
+
+par(mfrow = c(2, 2))
+plot(mod3_log)
+par(mfrow = c(1, 1))
+
+sup3_log <- validar_supuestos(mod3_log)
+sup3_log
+b3l <- coef(mod3_log)
+```
+
+El logaritmo del precio resuelve la heterocedasticidad (Breusch-Pagan pasa de `r pnum(sup3$p_valor[2])` a `r pnum(sup3_log$p_valor[2])` en el Log-Lin) y acerca los residuos a la normalidad, pero **ninguna especificación arregla la forma funcional**: RESET rechaza en las cuatro. Se elige el **Log-Lin** porque cumple la varianza constante con el MAE más bajo (`r num(cmp3$MAE[2], 1)` millones), aunque su R² ajustado (`r num(cmp3$R2_ajustado[2], 3)`) queda ligeramente por debajo del lineal.
+
+**Interpretación del modelo Log-Lin.** Cada habitación adicional eleva el precio un **`r pct(b3l[2])` %** en promedio. **Conclusión:** la transformación es pertinente para corregir la varianza, pero no convierte a las habitaciones en un buen predictor por sí solas. Su verdadero papel aparece en el modelo múltiple, cuando se compara a igualdad de área.
+
+## **2.4 Resumen de la modelación simple**
+
+```{r}
+data.frame(
+  Modelo         = c("1. Área construida", "2. Baños", "3. Habitaciones"),
+  Especificacion = c("Log-Log", "Log-Lin", "Log-Lin"),
+  R2_ajustado    = round(c(summary(mod1_log)$adj.r.squared, summary(mod2_log)$adj.r.squared,
+                           summary(mod3_log)$adj.r.squared), 3),
+  MAE_millones   = round(c(mae(mod1_log), mae(mod2_log), mae(mod3_log)), 1)
+)
+```
+
+El área construida es el mejor predictor individual del precio en La Flora: explica más y se equivoca menos. En los tres casos, **llevar el precio a logaritmo fue la decisión correcta**, porque la varianza crecía con el precio en todos los modelos lineales. La forma del predictor sí cambió de un caso a otro: logaritmo para el área, que tiene rendimientos decrecientes, y niveles para baños y habitaciones, cuyo efecto se lee mejor como un porcentaje fijo por unidad.
+
+# **3. Modelación múltiple**
+
+## **3.1 Base común para los modelos múltiples**
+
+Para que los modelos múltiples y la selección paso a paso sean comparables, todos deben estimarse sobre **las mismas filas**. Se construye una base con las variables candidatas y se eliminan los registros incompletos (los faltantes vienen de `parqueaderos`):
+
+```{r}
+datos_mod <- datos_sub %>%
+  select(id, precio_millon, Area_contruida, Habitaciones, Banos, parqueaderos, Estrato, Tipo) %>%
+  na.omit()
+
+nrow(datos_mod)
+table(datos_mod$Tipo)
+```
+
+Se trabaja con **`r nrow(datos_mod)` viviendas** completas.
+
+## **3.2 Modelo múltiple 1: tamaño y distribución**
+
+Este primer modelo usa solo variables cuantitativas que describen el inmueble: área, habitaciones, baños y parqueaderos.
+
+### Estimación
+
+```{r}
+mm1 <- lm(precio_millon ~ Area_contruida + Habitaciones + Banos + parqueaderos, data = datos_mod)
+summary(mm1)
+c1 <- coef(mm1)
+p1 <- summary(mm1)$coefficients[, 4]
+```
+
+### Interpretación
+
+En un modelo múltiple, cada coeficiente se lee **manteniendo constantes las demás variables**:
+
+- **Área construida:** con igual distribución, cada m² adicional suma `r num(c1["Area_contruida"])` millones.
+- **Habitaciones:** aquí aparece la primera sorpresa. Con la misma área, **una habitación adicional resta `r num(abs(c1["Habitaciones"]), 1)` millones** (p `r pval(p1["Habitaciones"])`). Tiene lógica: si el área no cambia, una habitación más significa espacios más pequeños y fragmentados. En La Flora, el mercado premia la amplitud, no la cantidad de cuartos.
+- **Baños:** cada baño adicional suma `r num(c1["Banos"], 1)` millones (p `r pval(p1["Banos"])`), el efecto más fuerte después del área. Los baños parecen funcionar como indicador de categoría y remodelación.
+- **Parqueaderos:** el coeficiente (`r num(c1["parqueaderos"], 1)`) **no es significativo** (p `r pval(p1["parqueaderos"])`). Conocido el tamaño, el número de parqueaderos no aporta información adicional.
+
+El modelo explica el `r round(100 * summary(mm1)$adj.r.squared, 1)` % de la variación del precio (R² ajustado), más que cualquiera de los modelos simples.
+
+### Validación de supuestos
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mm1)
+par(mfrow = c(1, 1))
+
+sup_mm1 <- validar_supuestos(mm1)
+sup_mm1
+
+# Multicolinealidad: un VIF mayor a 5 sería preocupante
+vif(mm1)
+
+# Observación más influyente
+cook_mm1 <- cooks.distance(mm1)
+datos_mod[which.max(cook_mm1), ]
+max(cook_mm1)
+```
+
+El VIF está por debajo de 5 en todas las variables, así que la multicolinealidad es moderada y no infla los errores estándar de manera grave. La forma funcional es aceptable (RESET p `r pval(sup_mm1$p_valor[4])`), pero hay dos problemas serios. La heterocedasticidad es fuerte (Breusch-Pagan p `r pval(sup_mm1$p_valor[2])`) y **una observación supera la distancia de Cook de 1** (`r num(max(cook_mm1), 2)`): de nuevo la casa de `r datos_mod$Area_contruida[which.max(cook_mm1)]` m² y `r datos_mod$precio_millon[which.max(cook_mm1)]` millones, que en *Residuals vs Leverage* aparece justo sobre la curva punteada que marca la distancia de Cook de 1. Los residuos tampoco son normales (p `r pval(sup_mm1$p_valor[1])`).
+
+No se elimina esa vivienda, porque no hay evidencia de que sea un error: es una casa muy grande y muy cara, y existen. La alternativa es una transformación que le quite peso.
+
+### Validación de la transformación logarítmica
+
+Siguiendo lo aprendido en la modelación simple, se toma el logaritmo del precio y del área. Habitaciones, baños y parqueaderos se dejan en niveles, porque son conteos pequeños.
+
+```{r}
+mm1_log <- lm(log(precio_millon) ~ log(Area_contruida) + Habitaciones + Banos + parqueaderos,
+              data = datos_mod)
+summary(mm1_log)
+
+par(mfrow = c(2, 2))
+plot(mm1_log)
+par(mfrow = c(1, 1))
+
+validar_supuestos(mm1_log)
+comparar_modelos(list("MM1 lineal" = mm1, "MM1 log" = mm1_log))
+c1l <- coef(mm1_log)
+p1l <- summary(mm1_log)$coefficients[, 4]
+```
+
+Esta vez la decisión tiene costos y beneficios. La versión logarítmica **gana** en dos frentes importantes: la heterocedasticidad deja de ser significativa al 5 % (Breusch-Pagan p `r pval(validar_supuestos(mm1_log)$p_valor[2])`) y la distancia de Cook máxima cae de `r num(max(cooks.distance(mm1)), 2)` a `r num(max(cooks.distance(mm1_log)), 2)`, así que la casa influyente pierde casi todo su peso. A cambio, **pierde** un poco de R² ajustado y RESET pasa a rechazar (p `r pval(validar_supuestos(mm1_log)$p_valor[4])`). El MAE es prácticamente igual (`r num(mae(mm1_log), 1)` frente a `r num(mae(mm1), 1)`).
+
+Se prefiere la versión logarítmica. Una estimación que depende de una sola casa y unos errores estándar distorsionados por la heterocedasticidad son problemas más graves para interpretar los coeficientes que una leve curvatura residual.
+
+**Interpretación (versión log).** Con lo demás constante, un 10 % más de área se asocia con un `r num((1.1^c1l["log(Area_contruida)"] - 1) * 100, 1)` % más de precio. Cada habitación adicional, a igual área, **reduce** el precio un `r num(abs(as.numeric(pct(c1l["Habitaciones"]))), 1)` % (p `r pval(p1l["Habitaciones"])`), mientras que cada baño lo **eleva** un `r pct(c1l["Banos"])` % (p `r pval(p1l["Banos"])`). Los parqueaderos siguen sin ser significativos (p `r pval(p1l["parqueaderos"])`).
+
+## **3.3 Modelo múltiple 2: con variables dummy**
+
+El segundo modelo incorpora **qué** se vende y **en qué estrato**, además del tamaño (área, baños y parqueaderos):
+
+- **Tipo** es una variable cualitativa que R convierte en una **dummy**: `TipoCasa` = 1 si el inmueble es casa y 0 si es apartamento. La categoría base es **Apartamento**.
+- **Estrato** entra como variable numérica y mide el salto de precio por cada nivel.
+
+```{r}
+# Codificación de la dummy: Apartamento es la base (fila de ceros)
+contrasts(datos_mod$Tipo)
+```
+
+### Estimación
+
+```{r}
+mm2 <- lm(precio_millon ~ Area_contruida + Banos + parqueaderos + Tipo + Estrato, data = datos_mod)
+summary(mm2)
+c2 <- coef(mm2)
+p2 <- summary(mm2)$coefficients[, 4]
+```
+
+### Interpretación
+
+- **TipoCasa (dummy):** este es el hallazgo central del informe. Con igual área, baños, parqueaderos y estrato, **una casa se ofrece en promedio `r num(abs(c2["TipoCasa"]), 1)` millones más barata que un apartamento** (p `r pval(p2["TipoCasa"])`). El coeficiente negativo confirma con rigor lo que el precio por metro cuadrado insinuaba. Una explicación plausible es la antigüedad: los apartamentos de La Flora suelen estar en edificios con portería, ascensor y zonas comunes, mientras que muchas casas son antiguas y el comprador descuenta el costo de remodelarlas.
+- **Estrato:** cada nivel suma `r num(c2["Estrato"], 1)` millones, pero solo es significativo al 10 % (p `r pval(p2["Estrato"])`). Con el `r round(100 * mean(datos_mod$Estrato == 5))` % de las viviendas en estrato 5, hay muy poca variación para medir su efecto con precisión.
+- **Área construida:** cada m² suma `r num(c2["Area_contruida"])` millones con lo demás constante.
+- **Baños:** cada baño suma `r num(c2["Banos"], 1)` millones (p `r pval(p2["Banos"])`).
+- **Parqueaderos:** no significativo (p `r pval(p2["parqueaderos"])`).
+- El intercepto no tiene interpretación práctica: correspondería a un apartamento de 0 m² y estrato 0.
+
+El R² ajustado es `r num(summary(mm2)$adj.r.squared, 3)`, algo mayor que el del modelo múltiple 1, aunque este modelo no incluye las habitaciones. El tipo de inmueble aporta información que el tamaño no contiene.
+
+### Validación de supuestos
+
+```{r}
+par(mfrow = c(2, 2))
+plot(mm2)
+par(mfrow = c(1, 1))
+
+sup_mm2 <- validar_supuestos(mm2)
+sup_mm2
+vif(mm2)
+```
+
+La multicolinealidad es baja (VIF < 5) y la forma funcional queda justo en el límite (RESET p `r pval(sup_mm2$p_valor[4])`). La heterocedasticidad sigue siendo fuerte (Breusch-Pagan p `r pval(sup_mm2$p_valor[2])`), los residuos no son normales (p `r pval(sup_mm2$p_valor[1])`) y la casa grande vuelve a acercarse al umbral de influencia (Cook máximo de `r num(max(cooks.distance(mm2)), 2)`).
+
+### Validación de la transformación logarítmica
+
+```{r}
+mm2_log <- lm(log(precio_millon) ~ log(Area_contruida) + Banos + parqueaderos + Tipo + Estrato,
+              data = datos_mod)
+summary(mm2_log)
+
+par(mfrow = c(2, 2))
+plot(mm2_log)
+par(mfrow = c(1, 1))
+
+validar_supuestos(mm2_log)
+comparar_modelos(list("MM2 lineal" = mm2, "MM2 log" = mm2_log))
+c2l <- coef(mm2_log)
+p2l <- summary(mm2_log)$coefficients[, 4]
+```
+
+La versión logarítmica es mejor. Tiene el MAE más bajo hasta ahora (`r num(mae(mm2_log), 1)` millones), conserva una forma funcional aceptable (RESET p `r pval(validar_supuestos(mm2_log)$p_valor[4])`) y reduce la distancia de Cook máxima a `r num(max(cooks.distance(mm2_log)), 2)`. La heterocedasticidad no desaparece del todo (Breusch-Pagan p `r pval(validar_supuestos(mm2_log)$p_valor[2])`), pero se reduce de forma drástica: el estadístico pasa de `r num(bptest(mm2)$statistic, 1)` a `r num(bptest(mm2_log)$statistic, 1)`. Lo que queda se puede atender con errores estándar robustos, como se hace en la sección 3.4.
+
+**Interpretación (versión log).** Con el precio en logaritmo, el coeficiente de una dummy se traduce en porcentaje con (e^b − 1) × 100:
+
+- **TipoCasa:** una casa vale un **`r num(abs(as.numeric(pct(c2l["TipoCasa"]))), 1)` % menos** que un apartamento comparable (p `r pval(p2l["TipoCasa"])`). Es el descuento de la casa frente al apartamento, expresado como proporción.
+- **Estrato:** cada nivel eleva el precio un `r pct(c2l["Estrato"])` % (p `r pval(p2l["Estrato"])`).
+- **Área:** un 10 % más de área equivale a un `r num((1.1^c2l["log(Area_contruida)"] - 1) * 100, 1)` % más de precio.
+- **Baños:** cada baño suma un `r pct(c2l["Banos"])` % (p `r pval(p2l["Banos"])`). Los **parqueaderos** no son significativos (p `r pval(p2l["parqueaderos"])`).
+
+## **3.4 Selección de variables paso a paso (stepwise)**
+
+Los dos modelos anteriores se armaron con criterio propio. La selección paso a paso deja que los datos decidan. Se parte del modelo completo (todas las variables candidatas, en la especificación logarítmica validada) y en cada paso se quita o se agrega la variable que más reduce el **AIC** (criterio de información de Akaike). El proceso se detiene cuando ningún cambio mejora el AIC.
+
+```{r}
+modelo_completo <- lm(log(precio_millon) ~ log(Area_contruida) + Habitaciones + Banos +
+                        parqueaderos + Tipo + Estrato, data = datos_mod)
+
+modelo_step <- step(modelo_completo, direction = "both", trace = 1)
+```
+
+```{r}
+# Resumen de los pasos realizados
+modelo_step$anova
+```
+
+```{r}
+# Comprobación: la selección hacia adelante, partiendo del modelo vacío
+modelo_nulo <- lm(log(precio_millon) ~ 1, data = datos_mod)
+modelo_fwd  <- step(modelo_nulo, scope = formula(modelo_completo), direction = "forward", trace = 0)
+formula(modelo_fwd)
+```
+
+```{r}
+summary(modelo_step)
+cs <- coef(modelo_step)
+ps <- summary(modelo_step)$coefficients[, 4]
+```
+
+**Qué decidió el algoritmo.** Solo sobró una variable: **parqueaderos**, que ya era no significativa en todos los modelos. Al retirarla, el AIC bajó de `r num(modelo_step$anova$AIC[1], 1)` a `r num(tail(modelo_step$anova$AIC, 1), 1)`, y ningún otro cambio lo mejoraba. La selección hacia adelante, que parte del modelo vacío, llega al mismo conjunto de variables.
+
+El modelo final es:
+
+**log(precio) = `r num(cs[1], 3)` `r sgn(cs["log(Area_contruida)"])` · log(área) `r sgn(cs["Habitaciones"])` · habitaciones `r sgn(cs["Banos"])` · baños `r sgn(cs["TipoCasa"])` · Casa `r sgn(cs["Estrato"])` · estrato**
+
+- Un **10 % más de área** se asocia con un `r num((1.1^cs["log(Area_contruida)"] - 1) * 100, 1)` % más de precio.
+- Cada **habitación** adicional, a igual área, resta un `r num(abs(as.numeric(pct(cs["Habitaciones"]))), 1)` % (p `r pval(ps["Habitaciones"])`).
+- Cada **baño** adicional suma un `r pct(cs["Banos"])` % (p `r pval(ps["Banos"])`).
+- Ser **casa** en lugar de apartamento resta un `r num(abs(as.numeric(pct(cs["TipoCasa"]))), 1)` % (p `r pval(ps["TipoCasa"])`).
+- Cada nivel de **estrato** suma un `r pct(cs["Estrato"])` % (p `r pval(ps["Estrato"])`).
+
+### Validación de supuestos del modelo seleccionado
+
+```{r}
+par(mfrow = c(2, 2))
+plot(modelo_step)
+par(mfrow = c(1, 1))
+
+sup_step <- validar_supuestos(modelo_step)
+sup_step
+vif(modelo_step)
+```
+
+```{r}
+# Errores estándar robustos (HC3): corrigen la inferencia ante heterocedasticidad
+rob <- coeftest(modelo_step, vcov. = hccm(modelo_step, type = "hc3"))
+rob
+```
+
+El modelo seleccionado cumple la forma funcional (RESET p `r pval(sup_step$p_valor[4])`), pero conserva algo de heterocedasticidad (Breusch-Pagan p `r pval(sup_step$p_valor[2])`) y residuos no normales (p `r pval(sup_step$p_valor[1])`). El VIF del logaritmo del área ronda `r num(vif(modelo_step)["log(Area_contruida)"], 1)`, en el límite de lo aceptable. Esto se explica porque área y tipo van de la mano: las casas son las viviendas grandes.
+
+Por la heterocedasticidad, la inferencia correcta es la de los **errores estándar robustos (HC3)**. Con ellos, área, habitaciones, baños y tipo mantienen su significancia, pero **el estrato deja de ser significativo al 5 %** (p robusto `r pval(rob["Estrato", 4])`). La lectura honesta es que, en un barrio casi todo estrato 5, el efecto del estrato no se puede afirmar con confianza.
+
+## **3.5 Predicción hipotética**
+
+¿Cuánto debería pedirse por dos viviendas típicas de La Flora? Se usa el modelo seleccionado con `predict()`. Como el modelo está en logaritmos, la predicción se devuelve a millones con `exp()`. Así se obtiene el precio **mediano** esperado, que es justo la cantidad que minimiza el error absoluto (MAE).
+
+```{r}
+nuevas <- data.frame(
+  Tipo           = factor(c("Apartamento", "Casa"), levels = levels(datos_mod$Tipo)),
+  Area_contruida = c(100, 200),
+  Habitaciones   = c(3, 4),
+  Banos          = c(2, 3),
+  parqueaderos   = c(1, 2),
+  Estrato        = c(5, 5))
+
+pred_conf <- exp(predict(modelo_step, newdata = nuevas, interval = "confidence", level = 0.95))
+pred_pred <- exp(predict(modelo_step, newdata = nuevas, interval = "prediction", level = 0.95))
+
+data.frame(nuevas,
+           Precio_estimado = round(pred_pred[, "fit"], 1),
+           IC95_media_inf  = round(pred_conf[, "lwr"], 1),
+           IC95_media_sup  = round(pred_conf[, "upr"], 1),
+           IP95_inf        = round(pred_pred[, "lwr"], 1),
+           IP95_sup        = round(pred_pred[, "upr"], 1))
+```
+
+**Interpretación.** Para un **apartamento de 100 m², 3 habitaciones, 2 baños, estrato 5**, el modelo estima **`r num(pred_pred[1, "fit"], 0)` millones**. Para una **casa de 200 m², 4 habitaciones, 3 baños, estrato 5**, estima **`r num(pred_pred[2, "fit"], 0)` millones**. La casa tiene el doble de área y un baño más, pero su precio estimado es apenas un `r round(100 * (pred_pred[2, "fit"] / pred_pred[1, "fit"] - 1))` % mayor. La elasticidad baja del área y el descuento por ser casa se combinan para producir ese resultado.
+
+El intervalo de confianza (`r num(pred_conf[1, "lwr"], 0)` a `r num(pred_conf[1, "upr"], 0)` millones para el apartamento) es estrecho porque estima el precio **promedio** de todos los apartamentos con esas características. El intervalo de predicción (`r num(pred_pred[1, "lwr"], 0)` a `r num(pred_pred[1, "upr"], 0)` millones) es mucho más ancho porque se refiere a **una oferta concreta**, con sus acabados, su piso y el estado de su edificio. Una oferta de ese apartamento por encima de `r num(pred_pred[1, "upr"], 0)` millones estaría fuera de lo que el mercado del barrio sugiere.
+
+Los parqueaderos se incluyen en `nuevas` por completitud, pero el modelo seleccionado no los usa.
+
+## **3.6 Métricas de evaluación: MAE**
+
+El **MAE** (error absoluto medio) mide, en millones de pesos, cuánto se equivoca el modelo en promedio. Se calcula de dos formas: sobre los mismos datos con que se estimó cada modelo (*dentro de muestra*), y con **validación cruzada de 10 pliegues** (*fuera de muestra*). En la validación cruzada, la base se divide en 10 partes. Cada parte se usa una vez como prueba mientras el modelo se estima con las otras nueve, de modo que cada vivienda se predice con un modelo que nunca la vio. Es la prueba honesta, y es más estable que un único corte entre entrenamiento y prueba.
+
+```{r}
+# Referencia: el mejor modelo simple, reestimado en la misma base
+ref_simple <- lm(log(precio_millon) ~ log(Area_contruida), data = datos_mod)
+
+modelos_finales <- list("Simple Log-Log (área)" = ref_simple,
+                        "MM1 lineal"            = mm1,
+                        "MM1 log"               = mm1_log,
+                        "MM2 lineal (dummy)"    = mm2,
+                        "MM2 log (dummy)"       = mm2_log,
+                        "Stepwise (log)"        = modelo_step)
+
+# MAE fuera de muestra con validación cruzada de 10 pliegues
+set.seed(123)
+k <- 10
+pliegues <- sample(rep(1:k, length.out = nrow(datos_mod)))
+
+mae_cv <- function(modelo) {
+  errores <- c()
+  for (i in 1:k) {
+    entrenamiento <- datos_mod[pliegues != i, ]
+    prueba        <- datos_mod[pliegues == i, ]
+    m    <- lm(formula(modelo), data = entrenamiento)
+    pred <- predict(m, newdata = prueba)
+    if (grepl("^log\\(", deparse(formula(modelo)[[2]]))) pred <- exp(pred)
+    errores <- c(errores, abs(prueba$precio_millon - pred))
+  }
+  mean(errores)
+}
+
+tabla_mae <- data.frame(
+  Modelo            = names(modelos_finales),
+  R2_ajustado       = sapply(modelos_finales, function(m) round(summary(m)$adj.r.squared, 3)),
+  MAE_dentro        = sapply(modelos_finales, function(m) round(mae(m), 1)),
+  MAE_val_cruzada   = sapply(modelos_finales, function(m) round(mae_cv(m), 1)))
+tabla_mae$MAE_relativo_pct <- round(100 * sapply(modelos_finales, mae) / mean(datos_mod$precio_millon), 1)
+rownames(tabla_mae) <- NULL
+tabla_mae
+```
+
+```{r}
+ggplotly(
+  ggplot(data.frame(real = datos_mod$precio_millon, estimado = exp(fitted(modelo_step)),
+                    Tipo = datos_mod$Tipo),
+         aes(x = estimado, y = real, color = Tipo)) +
+    geom_point(alpha = 0.7, size = 2) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "grey40") +
+    scale_color_manual(values = c("Apartamento" = "#2a78d6", "Casa" = "#eb6834")) +
+    labs(title = "Figura 4. Precio real vs. estimado (modelo stepwise)",
+         x = "Precio estimado (millones)", y = "Precio real (millones)") +
+    theme_minimal()
+)
+```
+
+**Interpretación.** El modelo stepwise se equivoca en promedio **`r num(mae(modelo_step), 1)` millones** por vivienda, cerca del `r num(100 * mae(modelo_step) / mean(datos_mod$precio_millon), 1)` % del precio medio del barrio (`r num(mean(datos_mod$precio_millon), 1)` millones). El mejor modelo simple fallaba por `r num(mae(ref_simple), 1)` millones: añadir distribución, tipo y estrato recorta el error en `r num(mae(ref_simple) - mae(modelo_step), 1)` millones por vivienda, y el R² ajustado sube de `r num(summary(ref_simple)$adj.r.squared, 3)` a `r num(summary(modelo_step)$adj.r.squared, 3)`.
+
+En validación cruzada, el MAE del stepwise es de `r num(mae_cv(modelo_step), 1)` millones, un poco por encima del valor dentro de muestra, como es normal. No hay señales de sobreajuste. Los modelos con dummy (MM2 y stepwise) le ganan al MM1 tanto dentro como fuera de muestra: **incorporar el tipo de vivienda y el estrato mejora la predicción más que sumar medidas de tamaño.** El MM2 log y el stepwise quedan prácticamente empatados (diferencias de menos de un millón). El stepwise se elige con el AIC, no con el MAE, y ambos son buenas opciones.
+
+En la Figura 4, los puntos siguen la diagonal y se dispersan más en los precios altos. Las casas grandes y caras siguen siendo las más difíciles de anticipar.
+
+# **4. Conclusiones**
+
+1. **El área manda, pero con elasticidad baja.** Es el mejor predictor individual del precio en La Flora. En el modelo final, un 10 % más de área se traduce en cerca de un `r num((1.1^cs["log(Area_contruida)"] - 1) * 100, 1)` % más de precio: los metros adicionales se pagan cada vez menos.
+2. **La dummy invierte la intuición.** A igualdad de área, distribución y estrato, una casa vale cerca de un `r num(abs(as.numeric(pct(cs["TipoCasa"]))), 0)` % menos que un apartamento. En este barrio el mercado prefiere el apartamento en edificio sobre la casa grande, probablemente por la antigüedad y el costo de remodelación de las casas.
+3. **Amplitud antes que cantidad de cuartos.** A igual área, más habitaciones restan valor y más baños lo suman. El comprador de La Flora paga por espacios amplios y bien dotados.
+4. **El logaritmo se justificó por dos razones.** Corrigió (o redujo drásticamente) la heterocedasticidad en todos los modelos, y le quitó a una sola casa de `r datos_mod$Area_contruida[which.max(cook_mm1)]` m² el poder de mover la estimación. En el MM1 costó un poco de forma funcional, un precio razonable a cambio de una inferencia confiable.
+5. **El modelo final** (log del área, habitaciones, baños, tipo y estrato) explica cerca del `r round(100 * summary(modelo_step)$adj.r.squared)` % de la variación del precio y se equivoca en unos `r num(mae(modelo_step), 0)` millones dentro de muestra y `r num(mae_cv(modelo_step), 0)` en validación cruzada.
+6. **Limitaciones.** Queda heterocedasticidad leve y no normalidad, por lo que se usaron errores robustos. El estrato casi no varía en el barrio, así que su efecto es incierto. Faltan variables clave como la antigüedad, el estado de remodelación o el tamaño del lote, y la pendiente del área podría ser distinta para casas y apartamentos (una interacción `Tipo:Area`, que muestra la Figura 3). Esas son las vías naturales para mejorar el modelo.
